@@ -1,22 +1,37 @@
+from urllib.parse import urlsplit, parse_qs, urlencode, urlunsplit
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base
 from app.core.config import settings
 
-# 1. Automatically sanitize and force the asyncpg driver
-db_url = str(settings.DATABASE_URL)
+def sanitize_database_url(url_str: str) -> str:
+    url_str = str(url_str).strip()
 
-if db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
-elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+asyncpg://"):
-    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    # 1. Force asyncpg driver
+    if url_str.startswith("postgres://"):
+        url_str = url_str.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif url_str.startswith("postgresql://") and not url_str.startswith("postgresql+asyncpg://"):
+        url_str = url_str.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# asyncpg requires '?ssl=require' instead of '?sslmode=require'
-if "sslmode=" in db_url:
-    db_url = db_url.replace("sslmode=", "ssl=")
+    # 2. Parse and strip libpq-only parameters (like channel_binding)
+    parsed = urlsplit(url_str)
+    query_dict = parse_qs(parsed.query)
 
-# 2. Create the Async Engine
+    # Incompatible with asyncpg
+    for key in ["channel_binding", "sslmode", "gssencmode", "target_session_attrs"]:
+        query_dict.pop(key, None)
+
+    # asyncpg requires ssl=require for Neon
+    query_dict["ssl"] = ["require"]
+
+    clean_query = urlencode(query_dict, doseq=True)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, clean_query, parsed.fragment))
+
+# Clean URL
+CLEAN_DB_URL = sanitize_database_url(settings.DATABASE_URL)
+
+# Create the Engine
 engine = create_async_engine(
-    db_url,
+    CLEAN_DB_URL,
     echo=False,
     future=True,
     pool_size=10,
