@@ -36,6 +36,7 @@ async def create_session(
     return session
 
 # In app/api/v1/inspections.py
+# In app/api/v1/inspections.py
 
 @router.post("/sessions/{session_id}/upload-photos")
 async def upload_inspection_photos(
@@ -71,10 +72,10 @@ async def upload_inspection_photos(
         with open(dest_path, "wb") as buffer:
             shutil.copyfileobj(photo.file, buffer)
 
-        # 1. Computer Vision Detection
+        # 1. YOLO Computer Vision Detection
         cv_result = yolo_service.process_image(dest_path)
 
-        is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust"])
+        is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage"])
         if is_defect:
             critical_detected += 1
         elif len(cv_result["detections"]) > 0:
@@ -89,9 +90,16 @@ async def upload_inspection_photos(
             confidence_score=cv_result["confidence_score"]
         )
         db.add(db_img)
-        processed_images.append(cv_result)
 
-        # 2. Live Broadcast via WebSocket to Frontend
+        processed_images.append({
+            "filename": photo.filename,
+            "category": cv_result["primary_category"],
+            "confidence": cv_result["confidence_score"],
+            "is_critical": is_defect,
+            "detections": cv_result["detections"]
+        })
+
+        # 2. WebSocket live broadcast
         await ws_manager.broadcast_to_session(session.id, {
             "event": "IMAGE_ANALYZED",
             "index": idx + 1,
@@ -99,7 +107,6 @@ async def upload_inspection_photos(
             "filename": photo.filename,
             "category": cv_result["primary_category"],
             "confidence": cv_result["confidence_score"],
-            "detections": cv_result["detections"]
         })
 
     session.total_images += len(photos)
@@ -107,11 +114,91 @@ async def upload_inspection_photos(
     session.minor_defects_count += minor_detected
     await db.commit()
 
+    # Return full inspection detection output to Flutter
     return {
-        "message": f"Successfully ingested and classified {len(photos)} photos.",
+        "message": "Inspection completed successfully.",
         "session_id": session.id,
-        "processed_count": len(photos)
+        "processed_count": len(photos),
+        "critical_defects": critical_detected,
+        "minor_defects": minor_detected,
+        "has_critical_issue": critical_detected > 0,
+        "results": processed_images
     }
+# @router.post("/sessions/{session_id}/upload-photos")
+# async def upload_inspection_photos(
+#     session_id: int,
+#     photos: list[UploadFile] = File(..., description="Select 1 to 200 physical asset photos"),
+#     user: User = Depends(get_current_user),
+#     db: AsyncSession = Depends(get_db)
+# ):
+#     result = await db.execute(
+#         select(InspectionSession).where(InspectionSession.id == session_id, InspectionSession.user_id == user.id)
+#     )
+#     session = result.scalars().first()
+#     if not session:
+#         raise HTTPException(status_code=404, detail="Inspection session not found.")
+
+#     if len(photos) > 200:
+#         raise HTTPException(status_code=400, detail="Cannot exceed maximum upload batch of 200 images.")
+
+#     upload_folder = os.path.abspath(f"uploads/session_{session_id}")
+#     os.makedirs(upload_folder, exist_ok=True)
+
+#     session.status = InspectionStatus.PROCESSING
+#     await db.commit()
+
+#     processed_images = []
+#     critical_detected = 0
+#     minor_detected = 0
+
+#     for idx, photo in enumerate(photos):
+#         filename = f"{idx}_{photo.filename}"
+#         dest_path = os.path.join(upload_folder, filename)
+
+#         with open(dest_path, "wb") as buffer:
+#             shutil.copyfileobj(photo.file, buffer)
+
+#         # 1. Computer Vision Detection
+#         cv_result = yolo_service.process_image(dest_path)
+
+#         is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust"])
+#         if is_defect:
+#             critical_detected += 1
+#         elif len(cv_result["detections"]) > 0:
+#             minor_detected += 1
+
+#         db_img = InspectionImage(
+#             session_id=session.id,
+#             file_path=dest_path,
+#             original_filename=photo.filename,
+#             yolo_detections=cv_result["detections"],
+#             detected_category=cv_result["primary_category"],
+#             confidence_score=cv_result["confidence_score"]
+#         )
+#         db.add(db_img)
+#         processed_images.append(cv_result)
+
+#         # 2. Live Broadcast via WebSocket to Frontend
+#         await ws_manager.broadcast_to_session(session.id, {
+#             "event": "IMAGE_ANALYZED",
+#             "index": idx + 1,
+#             "total": len(photos),
+#             "filename": photo.filename,
+#             "category": cv_result["primary_category"],
+#             "confidence": cv_result["confidence_score"],
+#             "detections": cv_result["detections"]
+#         })
+
+#     session.total_images += len(photos)
+#     session.critical_defects_count += critical_detected
+#     session.minor_defects_count += minor_detected
+#     await db.commit()
+
+#     return {
+#         "message": f"Successfully ingested and classified {len(photos)} photos.",
+#         "session_id": session.id,
+#         "processed_count": len(photos)
+#     }
 
 @router.post("/sessions/{session_id}/generate-document", response_model=PDFReportOut)
 async def generate_document(
