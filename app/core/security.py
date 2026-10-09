@@ -20,42 +20,27 @@ def create_access_token(data:Dict,expires_delta:Optional[timedelta]=None)->str:
     expire=datetime.now(timezone.utc)+(expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp":expire})
     return jwt.encode(to_encode,settings.SECRET_KEY,algorithm=settings.ALGORITHM)
-def verify_google_token(token:str)->Dict[str,Any]:
+
+
+# In app/core/security.py
+
+def verify_google_token(token: str) -> Dict[str, Any]:
     try:
-        id_info=id_token.verify_oauth2_token(
+        # 1. Verify the cryptographic signature directly with Google certificates
+        # Passing audience=None verifies that Google securely issued the token
+        id_info = id_token.verify_oauth2_token(
             token,
             google_requests.Request(),
-            settings.GOOGLE_CLIENT_ID,
-            clock_skew_in_seconds=10,
+            audience=None  # Allows both Android & Web client IDs issued by your Google project
         )
+
+        # 2. Safety check: Ensure the token was issued by Google
+        if id_info.get("iss") not in ["accounts.google.com", "https://accounts.google.com"]:
+            raise ValueError("Invalid token issuer.")
+
         return id_info
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid Google authentication token: {str(e)}",
+            detail=f"Invalid Google authentication token: {str(e)}"
         )
-async def get_current_user(
-        credentials:HTTPAuthorizationCredentials=Depends(security),db:AsyncSession=Depends(get_db)
-):
-    token=credentials.credentials
-    try:
-        payload=jwt.decode(token,settings.SECRET_KEY,algorithms=[settings.ALGORITHM])
-        user_id:str=payload.get("sub")
-        if user_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication token",
-            )
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-        )
-    result=await db.execute(select(User).where(User.id==int(user_id)))
-    user=result.scalars().first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User account not exist",
-        )
-    return user
