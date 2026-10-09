@@ -74,8 +74,8 @@ async def upload_inspection_photos(
 
         # 1. YOLO Computer Vision Detection
         cv_result = yolo_service.process_image(dest_path)
-
-        is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage"])
+        is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage", "anomaly"])
+        # is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage"])
         if is_defect:
             critical_detected += 1
         elif len(cv_result["detections"]) > 0:
