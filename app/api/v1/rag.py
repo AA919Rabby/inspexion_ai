@@ -6,10 +6,12 @@ from app.core.security import get_current_user
 from app.models.models import User, InspectionSession
 from app.schemas.schemas import RAGQueryRequest,RAGQueryResponse
 from app.services.rag_service import rag_service
+from app.services.rag_service import AsyncSession
 
 
 
 router = APIRouter()
+
 
 @router.post("/query",response_model=RAGQueryResponse)
 async def query_inspecyion_rag(payload:RAGQueryRequest,user:User=Depends(get_current_user),db:AsyncSession=Depends(get_db)):
