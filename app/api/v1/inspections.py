@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, s
 from fastapi.responses import RedirectResponse
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+import asyncio
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import User, InspectionSession, InspectionImage, PDFReport, InspectionStatus
@@ -56,16 +56,19 @@ async def upload_inspection_photos(
     minor_detected = 0
 
     # Create a temporary directory that auto-deletes when finished
+    # Add this at the very top of app/api/v1/inspections.py
+# ... (scroll down to upload_inspection_photos) ...
+
+    # Create a temporary directory that auto-deletes when finished
     with tempfile.TemporaryDirectory() as temp_dir:
         for idx, photo in enumerate(photos):
             temp_path = os.path.join(temp_dir, photo.filename)
 
-            # Save temporarily
             with open(temp_path, "wb") as buffer:
                 shutil.copyfileobj(photo.file, buffer)
 
-            # 1. Computer Vision Detection
-            cv_result = yolo_service.process_image(temp_path)
+            # SPEED FIX: Run heavy AI processing in a background thread
+            cv_result = await asyncio.to_thread(yolo_service.process_image, temp_path)
 
             is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage", "anomaly", "unrecognized_anomaly_damage"])
             if is_defect:
@@ -73,15 +76,19 @@ async def upload_inspection_photos(
             elif len(cv_result["detections"]) > 0:
                 minor_detected += 1
 
-            # 2. Upload to Cloudinary
-            cloud_url = cloudinary_service.upload_file(temp_path, folder=f"inspexion/sessions/{session.id}")
+            # SPEED FIX: Run Cloudinary network upload in a background thread
+            cloud_url = await asyncio.to_thread(
+                cloudinary_service.upload_file,
+                temp_path,
+                f"inspexion/sessions/{session.id}"
+            )
+
             if not cloud_url:
                 cloud_url = "failed_upload"
 
-            # 3. Save DB Record using Cloud URL
             db_img = InspectionImage(
                 session_id=session.id,
-                file_path=cloud_url,  # Save Cloudinary URL instead of local path
+                file_path=cloud_url,
                 original_filename=photo.filename,
                 yolo_detections=cv_result["detections"],
                 detected_category=cv_result["primary_category"],
@@ -96,31 +103,6 @@ async def upload_inspection_photos(
                 "is_critical": is_defect,
                 "detections": cv_result["detections"]
             })
-
-            # Broadcast via socket
-            await ws_manager.broadcast_to_session(session.id, {
-                "event": "IMAGE_ANALYZED",
-                "index": idx + 1,
-                "total": len(photos),
-                "filename": photo.filename,
-                "category": cv_result["primary_category"],
-                "confidence": cv_result["confidence_score"],
-            })
-
-    session.total_images += len(photos)
-    session.critical_defects_count += critical_detected
-    session.minor_defects_count += minor_detected
-    await db.commit()
-
-    return {
-        "message": "Inspection completed successfully.",
-        "session_id": session.id,
-        "processed_count": len(photos),
-        "critical_defects": critical_detected,
-        "minor_defects": minor_detected,
-        "has_critical_issue": critical_detected > 0,
-        "results": processed_images
-    }
 
 @router.post("/sessions/{session_id}/generate-document", response_model=PDFReportOut)
 async def generate_document(
