@@ -1,5 +1,10 @@
 import os
+import gc
 from typing import Dict, Any, List
+import torch
+
+# EXTREME MEMORY SAVER: Force PyTorch to use only 1 thread so it doesn't hoard RAM
+torch.set_num_threads(1)
 
 class YOLOService:
     def __init__(self, model_name: str = "yolov8n.pt"):
@@ -14,46 +19,53 @@ class YOLOService:
         return self._model
 
     def process_image(self, file_path: str) -> Dict[str, Any]:
-        # SPEED FIX: verbose=False stops heavy logging, imgsz=640 skips internal resizing
-        results = self.model(file_path, conf=0.25, verbose=False, imgsz=640)
+        try:
+            # MEMORY FIX: imgsz=320 cuts RAM usage in half compared to 640.
+            results = self.model(file_path, conf=0.25, verbose=False, imgsz=320)
 
-        detections: List[Dict[str, Any]] = []
-        highest_conf = 0.0
-        primary_category = ""
+            detections: List[Dict[str, Any]] = []
+            highest_conf = 0.0
+            primary_category = ""
 
-        for r in results:
-            boxes = r.boxes
-            for box in boxes:
-                cls_id = int(box.cls[0].item())
-                label = self.model.names[cls_id]
-                conf = float(box.conf[0].item())
-                xyxy = [round(float(c), 2) for c in box.xyxy[0].tolist()]
+            for r in results:
+                boxes = r.boxes
+                for box in boxes:
+                    cls_id = int(box.cls[0].item())
+                    label = self.model.names[cls_id]
+                    conf = float(box.conf[0].item())
+                    xyxy = [round(float(c), 2) for c in box.xyxy[0].tolist()]
 
+                    detections.append({
+                        "label": label,
+                        "confidence": round(conf, 4),
+                        "box": xyxy
+                    })
+
+                    if conf > highest_conf:
+                        highest_conf = conf
+                        primary_category = label
+
+            if len(detections) == 0:
+                primary_category = "unrecognized_anomaly_damage"
+                highest_conf = 0.85
                 detections.append({
-                    "label": label,
-                    "confidence": round(conf, 4),
-                    "box": xyxy
+                    "label": "damage_anomaly",
+                    "confidence": 0.85,
+                    "box": [0, 0, 0, 0]
                 })
+            elif not primary_category:
+                primary_category = "Physical Asset (Clean)"
 
-                if conf > highest_conf:
-                    highest_conf = conf
-                    primary_category = label
+            # Explicitly delete the heavy AI result objects from memory
+            del results
 
-        if len(detections) == 0:
-            primary_category = "unrecognized_anomaly_damage"
-            highest_conf = 0.85
-            detections.append({
-                "label": "damage_anomaly",
-                "confidence": 0.85,
-                "box": [0, 0, 0, 0]
-            })
-        elif not primary_category:
-            primary_category = "Physical Asset (Clean)"
-
-        return {
-            "primary_category": primary_category,
-            "confidence_score": round(highest_conf, 4),
-            "detections": detections
-        }
+            return {
+                "primary_category": primary_category,
+                "confidence_score": round(highest_conf, 4),
+                "detections": detections
+            }
+        finally:
+            # MEMORY FIX: Force Python to empty the trash immediately
+            gc.collect()
 
 yolo_service = YOLOService()

@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
+import gc
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import User, InspectionSession, InspectionImage, PDFReport, InspectionStatus
@@ -36,6 +37,75 @@ async def create_session(
     await db.refresh(session)
     return session
 
+# @router.post("/sessions/{session_id}/upload-photos")
+# async def upload_inspection_photos(
+#     session_id: int,
+#     photos: list[UploadFile] = File(..., description="Select physical asset photos"),
+#     user: User = Depends(get_current_user),
+#     db: AsyncSession = Depends(get_db)
+# ):
+#     result = await db.execute(select(InspectionSession).where(InspectionSession.id == session_id, InspectionSession.user_id == user.id))
+#     session = result.scalars().first()
+#     if not session:
+#         raise HTTPException(status_code=404, detail="Inspection session not found.")
+
+#     session.status = InspectionStatus.PROCESSING
+#     await db.commit()
+
+#     processed_images = []
+#     critical_detected = 0
+#     minor_detected = 0
+
+#     # Create a temporary directory that auto-deletes when finished
+#     # Add this at the very top of app/api/v1/inspections.py
+# # ... (scroll down to upload_inspection_photos) ...
+
+#     # Create a temporary directory that auto-deletes when finished
+#     with tempfile.TemporaryDirectory() as temp_dir:
+#         for idx, photo in enumerate(photos):
+#             temp_path = os.path.join(temp_dir, photo.filename)
+
+#             with open(temp_path, "wb") as buffer:
+#                 shutil.copyfileobj(photo.file, buffer)
+
+#             # SPEED FIX: Run heavy AI processing in a background thread
+#             cv_result = await asyncio.to_thread(yolo_service.process_image, temp_path)
+
+#             is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage", "anomaly", "unrecognized_anomaly_damage"])
+#             if is_defect:
+#                 critical_detected += 1
+#             elif len(cv_result["detections"]) > 0:
+#                 minor_detected += 1
+
+#             # SPEED FIX: Run Cloudinary network upload in a background thread
+#             cloud_url = await asyncio.to_thread(
+#                 cloudinary_service.upload_file,
+#                 temp_path,
+#                 f"inspexion/sessions/{session.id}"
+#             )
+
+#             if not cloud_url:
+#                 cloud_url = "failed_upload"
+
+#             db_img = InspectionImage(
+#                 session_id=session.id,
+#                 file_path=cloud_url,
+#                 original_filename=photo.filename,
+#                 yolo_detections=cv_result["detections"],
+#                 detected_category=cv_result["primary_category"],
+#                 confidence_score=cv_result["confidence_score"]
+#             )
+#             db.add(db_img)
+
+#             processed_images.append({
+#                 "filename": photo.filename,
+#                 "category": cv_result["primary_category"],
+#                 "confidence": cv_result["confidence_score"],
+#                 "is_critical": is_defect,
+#                 "detections": cv_result["detections"]
+#             })
+
+
 @router.post("/sessions/{session_id}/upload-photos")
 async def upload_inspection_photos(
     session_id: int,
@@ -55,11 +125,6 @@ async def upload_inspection_photos(
     critical_detected = 0
     minor_detected = 0
 
-    # Create a temporary directory that auto-deletes when finished
-    # Add this at the very top of app/api/v1/inspections.py
-# ... (scroll down to upload_inspection_photos) ...
-
-    # Create a temporary directory that auto-deletes when finished
     with tempfile.TemporaryDirectory() as temp_dir:
         for idx, photo in enumerate(photos):
             temp_path = os.path.join(temp_dir, photo.filename)
@@ -67,7 +132,7 @@ async def upload_inspection_photos(
             with open(temp_path, "wb") as buffer:
                 shutil.copyfileobj(photo.file, buffer)
 
-            # SPEED FIX: Run heavy AI processing in a background thread
+            # Process image in background thread
             cv_result = await asyncio.to_thread(yolo_service.process_image, temp_path)
 
             is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage", "anomaly", "unrecognized_anomaly_damage"])
@@ -76,7 +141,7 @@ async def upload_inspection_photos(
             elif len(cv_result["detections"]) > 0:
                 minor_detected += 1
 
-            # SPEED FIX: Run Cloudinary network upload in a background thread
+            # Upload to Cloudinary in background thread
             cloud_url = await asyncio.to_thread(
                 cloudinary_service.upload_file,
                 temp_path,
@@ -103,6 +168,28 @@ async def upload_inspection_photos(
                 "is_critical": is_defect,
                 "detections": cv_result["detections"]
             })
+
+            # Force memory cleanup after EACH photo to stay under 512MB RAM
+            gc.collect()
+
+    session.total_images += len(photos)
+    session.critical_defects_count += critical_detected
+    session.minor_defects_count += minor_detected
+    await db.commit()
+
+    # Final cleanup before returning response
+    gc.collect()
+
+    return {
+        "message": "Inspection completed successfully.",
+        "session_id": session.id,
+        "processed_count": len(photos),
+        "critical_defects": critical_detected,
+        "minor_defects": minor_detected,
+        "has_critical_issue": critical_detected > 0,
+        "results": processed_images
+    }
+
 
 @router.post("/sessions/{session_id}/generate-document", response_model=PDFReportOut)
 async def generate_document(
