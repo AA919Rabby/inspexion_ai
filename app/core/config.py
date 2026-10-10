@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID:str
     OPENROUTER_API_KEY:str
     OPENROUTER_MODEL:str="anthropic/claude-3.5-sonnet"
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
     model_config=SettingsConfigDict(
         env_file=".env",
         extra="ignore",

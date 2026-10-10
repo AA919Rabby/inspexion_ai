@@ -1,4 +1,5 @@
 import os
+import tempfile
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -7,10 +8,10 @@ from reportlab.lib import colors
 class PDFGenerator:
     @staticmethod
     def generate_report(session_id: int, title: str, summary: str, defects_summary: dict) -> str:
-        reports_dir = os.path.abspath("generated_reports")
-        os.makedirs(reports_dir, exist_ok=True)
+        # Use Python's built-in temporary directory so it doesn't bloat the server
+        temp_dir = tempfile.gettempdir()
         filename = f"Inspection_Report_{session_id}.pdf"
-        filepath = os.path.join(reports_dir, filename)
+        filepath = os.path.join(temp_dir, filename)
 
         doc = SimpleDocTemplate(filepath, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
         story = []
@@ -50,6 +51,7 @@ class PDFGenerator:
                 story.append(Spacer(1, 4))
 
         doc.build(story)
+        # Returns the temp path so we can upload it to Cloudinary, then delete it.
         return filepath
 
 pdf_generator = PDFGenerator()
