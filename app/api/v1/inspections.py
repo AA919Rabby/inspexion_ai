@@ -2,7 +2,6 @@ import os
 import shutil
 import tempfile
 import asyncio
-import gc
 from typing import List
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import Response
@@ -63,26 +62,32 @@ async def upload_inspection_photos(
             with open(temp_path, "wb") as buffer:
                 shutil.copyfileobj(photo.file, buffer)
 
-            # SPEED FIX: Run YOLO and Cloudinary simultaneously in parallel!
-            cv_result, cloud_url = await asyncio.gather(
-                asyncio.to_thread(yolo_service.process_image, temp_path),
-                asyncio.to_thread(cloudinary_service.upload_file, temp_path, f"inspexion/sessions/{session.id}")
+            # 1. Upload to Cloudinary (Takes ~0.8s)
+            cloud_url = await asyncio.to_thread(
+                cloudinary_service.upload_file, temp_path, f"inspexion/sessions/{session.id}"
             )
-
             if not cloud_url:
                 cloud_url = "failed_upload"
 
-            is_defect = any(c in cv_result["primary_category"].lower() for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage", "anomaly", "unrecognized_anomaly_damage"])
+            # 2. Fast Cloud Vision Analysis (Takes ~1.0s, uses 0 MB of Render RAM!)
+            cv_result = await yolo_service.analyze_image_url(cloud_url)
+
+            is_defect = cv_result.get("is_critical", False) or any(
+                c in cv_result["primary_category"].lower()
+                for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage", "anomaly", "glass", "fracture"]
+            )
+
             if is_defect:
                 critical_detected += 1
-            elif len(cv_result["detections"]) > 0:
+            else:
                 minor_detected += 1
 
+            # 3. Save to DB
             db_img = InspectionImage(
                 session_id=session.id,
                 file_path=cloud_url,
                 original_filename=photo.filename,
-                yolo_detections=cv_result["detections"],
+                yolo_detections=cv_result.get("detections", []),
                 detected_category=cv_result["primary_category"],
                 confidence_score=cv_result["confidence_score"]
             )
@@ -93,16 +98,13 @@ async def upload_inspection_photos(
                 "category": cv_result["primary_category"],
                 "confidence": cv_result["confidence_score"],
                 "is_critical": is_defect,
-                "detections": cv_result["detections"]
+                "detections": cv_result.get("detections", [])
             })
-
-            gc.collect()
 
     session.total_images += len(photos)
     session.critical_defects_count += critical_detected
     session.minor_defects_count += minor_detected
     await db.commit()
-    gc.collect()
 
     return {
         "message": "Inspection completed successfully.",

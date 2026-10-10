@@ -12,6 +12,9 @@ from app.core.database import get_db
 
 security = HTTPBearer()
 
+# Persistent session: avoids re-downloading Google certificates on every login!
+_google_request_session = google_requests.Request()
+
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
@@ -20,11 +23,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 def verify_google_token(token: str) -> Dict[str, Any]:
     try:
-        # Verifies cryptographic signature directly with Google
-        # audience=None allows both Android & Web client IDs issued by your Google project
         id_info = id_token.verify_oauth2_token(
             token,
-            google_requests.Request(),
+            _google_request_session,
             audience=None
         )
 
