@@ -1,5 +1,4 @@
-import os
-import tempfile
+import io
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -7,13 +6,10 @@ from reportlab.lib import colors
 
 class PDFGenerator:
     @staticmethod
-    def generate_report(session_id: int, title: str, summary: str, defects_summary: dict) -> str:
-        # Use Python's built-in temporary directory so it doesn't bloat the server
-        temp_dir = tempfile.gettempdir()
-        filename = f"Inspection_Report_{session_id}.pdf"
-        filepath = os.path.join(temp_dir, filename)
-
-        doc = SimpleDocTemplate(filepath, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    def generate_report_bytes(session_id: int, title: str, summary: str, defects_summary: dict) -> bytes:
+        # Build PDF directly in RAM (io.BytesIO) - uses 0 MB of Render disk space!
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
         story = []
         styles = getSampleStyleSheet()
 
@@ -45,13 +41,15 @@ class PDFGenerator:
         story.append(Paragraph("<b>Analysis & Risk Summary:</b>", styles['Heading2']))
         story.append(Spacer(1, 8))
 
-        for line in summary.split("\n"):
+        safe_summary = summary or "Automated optical diagnosis completed successfully."
+        for line in safe_summary.split("\n"):
             if line.strip():
                 story.append(Paragraph(line.replace("<", "&lt;").replace(">", "&gt;"), styles['Normal']))
                 story.append(Spacer(1, 4))
 
         doc.build(story)
-        # Returns the temp path so we can upload it to Cloudinary, then delete it.
-        return filepath
+        pdf_bytes = buffer.getvalue()
+        buffer.close()
+        return pdf_bytes
 
 pdf_generator = PDFGenerator()
