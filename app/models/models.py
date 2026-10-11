@@ -17,7 +17,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
     full_name = Column(String(255), nullable=True)
-    google_id = Column(String(255), unique=True, index=True, nullable=False)
+    google_id = Column(String(255), unique=True, index=True, nullable=True) # nullable=True
+    apple_id = Column(String(255), unique=True, index=True, nullable=True)  # NEW: Apple ID
     avatar_url = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

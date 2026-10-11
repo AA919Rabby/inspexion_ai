@@ -9,8 +9,13 @@ from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
+import httpx
+from jose import jwt, jwk
+
 
 security = HTTPBearer()
+
+APPLE_PUBLIC_KEYS_URL = "https://appleid.apple.com/auth/keys"
 
 # Persistent session: avoids re-downloading Google certificates on every login!
 _google_request_session = google_requests.Request()
@@ -20,6 +25,47 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+async def verify_apple_token(identity_token: str) -> Dict[str, Any]:
+    """
+    Verifies the cryptographic signature of an Apple identityToken against Apple's public JWKS.
+    """
+    try:
+        # Fetch Apple's current public signing keys
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(APPLE_PUBLIC_KEYS_URL)
+            apple_keys = resp.json().get("keys", [])
+
+        # Get the unverified header to match the 'kid' (Key ID)
+        unverified_header = jwt.get_unverified_header(identity_token)
+        kid = unverified_header.get("kid")
+
+        matching_key = next((k for k in apple_keys if k.get("kid") == kid), None)
+        if not matching_key:
+            raise ValueError("No matching Apple public key found for token.")
+
+        # Construct public key and verify signature
+        public_key = jwk.construct(matching_key)
+        claims = jwt.decode(
+            identity_token,
+            public_key.to_dict(),
+            algorithms=["RS256"],
+            audience=None, # Allow your app bundle ID
+            options={"verify_aud": False}
+        )
+
+        if claims.get("iss") != "https://appleid.apple.com":
+            raise ValueError("Invalid Apple token issuer.")
+
+        return claims
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid Apple identity token: {str(e)}"
+        )
+
+
 
 def verify_google_token(token: str) -> Dict[str, Any]:
     try:
