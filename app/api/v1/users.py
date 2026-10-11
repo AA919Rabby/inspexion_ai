@@ -1,15 +1,13 @@
-import os
-import shutil
-import tempfile
 import asyncio
 from typing import Optional
 from fastapi import APIRouter, Depends, Form, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
+import cloudinary.uploader
+
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import User
 from app.schemas.schemas import UserOut
-from app.services.cloudinary_service import cloudinary_service
 
 router = APIRouter()
 
@@ -24,21 +22,31 @@ async def update_profile(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    # 1. Update Name
     if full_name is not None and full_name.strip():
         user.full_name = full_name.strip()
 
-    if avatar is not None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = os.path.join(temp_dir, avatar.filename)
-            with open(temp_path, "wb") as buffer:
-                shutil.copyfileobj(avatar.file, buffer)
-
-            cloud_avatar_url = await asyncio.to_thread(
-                cloudinary_service.upload_file, temp_path, "inspexion/avatars"
+    # 2. Upload Avatar File directly to Cloudinary via raw bytes
+    if avatar is not None and avatar.filename:
+        try:
+            image_bytes = await avatar.read()
+            # Upload bytes directly (No temporary disk files needed!)
+            upload_result = await asyncio.to_thread(
+                cloudinary.uploader.upload,
+                image_bytes,
+                folder="inspexion/avatars",
+                resource_type="image"
             )
-            if cloud_avatar_url:
-                user.avatar_url = cloud_avatar_url
+            secure_url = upload_result.get("secure_url")
+            if secure_url:
+                user.avatar_url = secure_url
+                print(f"✅ Successfully saved avatar URL in DB: {secure_url}")
+        except Exception as e:
+            print(f"❌ Cloudinary avatar upload failed: {e}")
 
+    # 3. Commit to Neon PostgreSQL Database
     await db.commit()
     await db.refresh(user)
+
+    # 4. Return updated User model to Flutter
     return user
