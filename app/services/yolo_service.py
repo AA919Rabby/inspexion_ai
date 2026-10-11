@@ -3,19 +3,13 @@ import httpx
 from typing import Dict, Any, List
 from app.core.config import settings
 
-
 class YOLOService:
     def __init__(self):
         self.api_key = settings.OPENROUTER_API_KEY
         self.endpoint = "https://openrouter.ai/api/v1/chat/completions"
-        # Uses lightweight, ultra-fast vision model
         self.vision_model = "google/gemini-2.0-flash-001"
 
     async def analyze_image_url(self, image_url: str) -> Dict[str, Any]:
-        """
-        Fast Cloud Vision Inspection via OpenRouter.
-        Executes in ~1.2 seconds, uses 0 MB of Render RAM!
-        """
         prompt = (
             "Analyze this physical asset inspection photo. Check for defects, damage, broken glass, cracks, dents, rust, or normal condition. "
             "Respond ONLY with a valid JSON object in this exact format, without markdown: "
@@ -46,7 +40,6 @@ class YOLOService:
                 resp = await client.post(self.endpoint, headers=headers, json=payload)
                 if resp.status_code == 200:
                     content = resp.json()["choices"][0]["message"]["content"].strip()
-                    # Clean potential markdown wrapping
                     if content.startswith("```"):
                         content = content.split("```")[1]
                         if content.startswith("json"):
@@ -67,7 +60,6 @@ class YOLOService:
         except Exception as e:
             print(f"Vision API fallback triggered: {e}")
 
-        # Fast Fallback if API times out
         return {
             "primary_category": "Damaged Asset (Anomaly)",
             "confidence_score": 0.88,
