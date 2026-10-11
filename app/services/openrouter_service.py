@@ -32,9 +32,9 @@ class OpenRouterService:
             print(f"OpenRouter Timeout/Error: {e}")
 
         # FAST FALLBACK: If AI fails or is too slow, use this instant response
-        return "Standard Automated Diagnostic: Review identified critical anomalies. Asset requires manual safety evaluation based on YOLO optical detection parameters."
+        return "Standard Automated Diagnostic: Review identified critical anomalies. Asset requires manual safety evaluation based on Optical detection parameters."
 
     async def ask_rag(self, question: str, context: str) -> str:
-        return "RAG analysis is active. Please review the official PDF for full details."
+        return "Review the official PDF for full details."
 
 openrouter_service = OpenRouterService()
