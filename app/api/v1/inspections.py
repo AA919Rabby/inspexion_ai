@@ -29,7 +29,7 @@ async def create_session(
     session = InspectionSession(
         user_id=user.id,
         title=payload.get("title", "Asset Damage Inspection"),
-        asset_type=payload.get("asset_type", "Physical Machinery")
+        asset_type=payload.get("asset_type", "Physical Asset")
     )
     db.add(session)
     await db.commit()
@@ -62,27 +62,22 @@ async def upload_inspection_photos(
             with open(temp_path, "wb") as buffer:
                 shutil.copyfileobj(photo.file, buffer)
 
-            # 1. Upload to Cloudinary (Takes ~0.8s)
+            # Upload to Cloudinary
             cloud_url = await asyncio.to_thread(
                 cloudinary_service.upload_file, temp_path, f"inspexion/sessions/{session.id}"
             )
             if not cloud_url:
                 cloud_url = "failed_upload"
 
-            # 2. Fast Cloud Vision Analysis (Takes ~1.0s, uses 0 MB of Render RAM!)
+            # Analyze with accurate AI
             cv_result = await yolo_service.analyze_image_url(cloud_url)
-
-            is_defect = cv_result.get("is_critical", False) or any(
-                c in cv_result["primary_category"].lower()
-                for c in ["crack", "dent", "leak", "fire", "smoke", "rust", "broken", "damage", "anomaly", "glass", "fracture"]
-            )
+            is_defect = cv_result.get("is_critical", False)
 
             if is_defect:
                 critical_detected += 1
             else:
                 minor_detected += 1
 
-            # 3. Save to DB
             db_img = InspectionImage(
                 session_id=session.id,
                 file_path=cloud_url,
@@ -95,10 +90,11 @@ async def upload_inspection_photos(
 
             processed_images.append({
                 "filename": photo.filename,
+                "file_path": cloud_url,
                 "category": cv_result["primary_category"],
                 "confidence": cv_result["confidence_score"],
                 "is_critical": is_defect,
-                "detections": cv_result.get("detections", [])
+                "description": cv_result.get("defect_description", "Item visually verified.")
             })
 
     session.total_images += len(photos)
@@ -173,9 +169,23 @@ async def download_pdf_report(
     session_res = await db.execute(select(InspectionSession).where(InspectionSession.id == report.session_id))
     session = session_res.scalars().first()
 
+    # Fetch all images with categories and descriptions
+    img_res = await db.execute(select(InspectionImage).where(InspectionImage.session_id == report.session_id))
+    db_images = img_res.scalars().all()
+    images_data = [
+        {
+            "file_path": img.file_path,
+            "category": img.detected_category,
+            "conf": img.confidence_score,
+            "is_critical": any(c in img.detected_category.lower() for c in ["crack", "dent", "broken", "damage", "hazard"]),
+            "description": "Visual diagnostic scan complete."
+        }
+        for img in db_images
+    ]
+
     summary_text = session.summary if session else "Inspection Report Complete."
     defects_stat = {
-        "total_images": session.total_images if session else 1,
+        "total_images": session.total_images if session else len(db_images),
         "critical": session.critical_defects_count if session else 0,
         "minor": session.minor_defects_count if session else 0
     }
@@ -185,7 +195,8 @@ async def download_pdf_report(
         session_id=report.session_id,
         title=title,
         summary=summary_text,
-        defects_summary=defects_stat
+        defects_summary=defects_stat,
+        images_data=images_data
     )
 
     return Response(
