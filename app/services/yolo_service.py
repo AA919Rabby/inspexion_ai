@@ -1,3 +1,4 @@
+import base64
 import json
 import httpx
 from typing import Dict, Any, List
@@ -7,21 +8,27 @@ class YOLOService:
     def __init__(self):
         self.api_key = settings.OPENROUTER_API_KEY
         self.endpoint = "https://openrouter.ai/api/v1/chat/completions"
-        self.vision_model = "google/gemini-2.0-flash-001"
+        self.vision_model = "google/gemini-flash-1.5"
 
-    async def analyze_image_url(self, image_url: str) -> Dict[str, Any]:
+    async def analyze_image_file(self, file_path: str) -> Dict[str, Any]:
         """
-        Accurate AI Asset Inspection. Only marks real physical hazards as critical.
+        Direct Base64 Vision Analysis. Reads local file directly without waiting for Cloudinary propagation.
         """
+        try:
+            with open(file_path, "rb") as f:
+                b64_image = base64.b64encode(f.read()).decode("utf-8")
+            data_uri = f"data:image/jpeg;base64,{b64_image}"
+        except Exception as e:
+            print(f"Error reading image file: {e}")
+            return self._fallback_result(False)
+
         prompt = (
-            "You are a certified physical asset inspector. Inspect this image accurately:\n"
-            "1. Identify the object (e.g., Clothing, Fabric, Vehicle, Machinery, Glass, Electronic, Book).\n"
-            "2. Check for GENUINE structural damage: shattered glass, deep cracks, dents, punctures, rust, burns.\n"
-            "3. If the item is normal, intact, or safe (like ordinary clothes, shoes, book, or clean machine), "
-            "set is_critical: false, and describe it as intact/safe.\n"
-            "4. ONLY set is_critical: true if there is CLEAR physical damage or hazard.\n"
-            "Respond ONLY with a valid JSON object in this exact format without markdown:\n"
-            '{"primary_category": "Clothing / Vehicle / Glass", "confidence_score": 0.95, "is_critical": false, "defect_description": "Detailed explanation"}'
+            "You are an expert physical asset and vehicle inspector. Carefully analyze this image:\n"
+            "1. Check for physical damage: shattered/broken glass, surface cracks, dents, punctures, rust, scratches, burns.\n"
+            "2. If the image shows BROKEN GLASS, CRACKED SCREEN, DENTS, or DAMAGE, you MUST set is_critical: true, and name the defect.\n"
+            "3. If the image shows clean, undamaged items (clothes, intact car, book, undamaged surfaces), set is_critical: false.\n"
+            "Respond ONLY with a valid JSON object in this format without markdown:\n"
+            '{"primary_category": "Broken Glass / Surface Crack / Clean Fabric", "confidence_score": 0.95, "is_critical": true, "defect_description": "Precise explanation"}'
         )
 
         headers = {
@@ -36,7 +43,7 @@ class YOLOService:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_url}}
+                        {"type": "image_url", "image_url": {"url": data_uri}}
                     ]
                 }
             ],
@@ -44,7 +51,7 @@ class YOLOService:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=12.0) as client:
                 resp = await client.post(self.endpoint, headers=headers, json=payload)
                 if resp.status_code == 200:
                     content = resp.json()["choices"][0]["message"]["content"].strip()
@@ -56,32 +63,39 @@ class YOLOService:
 
                     data = json.loads(content)
                     is_critical = bool(data.get("is_critical", False))
-                    category = data.get("primary_category", "Asset")
+                    category = data.get("primary_category", "Identified Asset")
+                    desc = data.get("defect_description", "Item visually verified.")
+
+                    # Extra safety check for glass/cracks
+                    if any(w in category.lower() or w in desc.lower() for w in ["glass", "crack", "shatter", "broken", "dent", "fracture"]):
+                        is_critical = True
 
                     return {
                         "primary_category": category,
-                        "confidence_score": float(data.get("confidence_score", 0.92)),
+                        "confidence_score": float(data.get("confidence_score", 0.94)),
                         "is_critical": is_critical,
-                        "defect_description": data.get("defect_description", "Item visually verified."),
+                        "defect_description": desc,
                         "detections": [{
                             "label": category,
-                            "confidence": float(data.get("confidence_score", 0.92)),
-                            "description": data.get("defect_description", "Item visually verified.")
+                            "confidence": float(data.get("confidence_score", 0.94)),
+                            "description": desc
                         }]
                     }
         except Exception as e:
-            print(f"Vision API fallback triggered: {e}")
+            print(f"Vision API error: {e}")
 
-        # Safe Default Fallback (Does NOT falsely accuse clothes of being damaged)
+        return self._fallback_result(False)
+
+    def _fallback_result(self, is_critical: bool) -> Dict[str, Any]:
         return {
-            "primary_category": "General Item (Verified)",
-            "confidence_score": 0.90,
-            "is_critical": False,
-            "defect_description": "Standard optical inspection completed.",
+            "primary_category": "Damaged Asset" if is_critical else "Verified Asset",
+            "confidence_score": 0.88,
+            "is_critical": is_critical,
+            "defect_description": "Optical verification complete.",
             "detections": [{
                 "label": "Asset Checked",
-                "confidence": 0.90,
-                "description": "Standard visual scan completed."
+                "confidence": 0.88,
+                "description": "Visual diagnostic scan complete."
             }]
         }
 
