@@ -2,16 +2,25 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
+from sqlalchemy import text  # IMPORT TEXT FOR AUTO-MIGRATION
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.api.v1 import auth, users, inspections, analytics, rag, ws
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize tables
+    # 1. Initialize tables if not exist
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # 2. AUTO-MIGRATION: Ensure 'apple_id' column exists in Neon DB (Fixes 500 Error!)
+        try:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS apple_id VARCHAR(255);"))
+            await conn.execute(text("ALTER TABLE users ALTER COLUMN google_id DROP NOT NULL;"))
+            print("✅ Database schema verified & updated successfully.")
+        except Exception as e:
+            print(f"Schema update notice: {e}")
+
     yield
     await engine.dispose()
 
@@ -54,8 +63,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# RENDER HEALTH CHECK PROBES (FIXES THE TIMEOUT ERROR!)
-# Render probes 'HEAD /' and 'GET /' to verify the server is alive.
+# Health Checks for Render
 @app.api_route("/", methods=["GET", "HEAD"], tags=["Health"])
 async def root():
     return {"status": "online", "service": settings.PROJECT_NAME}
