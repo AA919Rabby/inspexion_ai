@@ -5,7 +5,7 @@ import asyncio
 from typing import List
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import Response
-from sqlalchemy import func
+from sqlalchemy import func, delete
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,13 +48,24 @@ async def upload_inspection_photos(
     if not session:
         raise HTTPException(status_code=404, detail="Inspection session not found.")
 
-    # USER-SPECIFIC SESSION NUMBER (#1, #2... for this user, NOT global database 34)
-    user_sessions_count = await db.scalar(
-        select(func.count(InspectionSession.id)).where(
+    # 1. Clean up abandoned draft sessions with 0 images so they never mess up the counter
+    await db.execute(
+        delete(InspectionSession).where(
             InspectionSession.user_id == user.id,
-            InspectionSession.id <= session.id
+            InspectionSession.total_images == 0,
+            InspectionSession.id < session.id
         )
-    ) or 1
+    )
+
+    # 2. Count ONLY real completed reports this user actually owns
+    completed_reports_count = await db.scalar(
+        select(func.count(PDFReport.id))
+        .join(InspectionSession, PDFReport.session_id == InspectionSession.id)
+        .where(InspectionSession.user_id == user.id)
+    ) or 0
+
+    # Clean user scan number: 1st scan is ALWAYS #1
+    user_scan_number = completed_reports_count + 1
 
     session.status = InspectionStatus.PROCESSING
     await db.commit()
@@ -69,7 +80,7 @@ async def upload_inspection_photos(
             with open(temp_path, "wb") as buffer:
                 shutil.copyfileobj(photo.file, buffer)
 
-            # 1. Analyze directly with raw base64 (accurate broken glass detection)
+            # Analyze directly with raw base64 (accurate detection)
             cv_result = await yolo_service.analyze_image_file(temp_path)
             is_defect = cv_result.get("is_critical", False)
 
@@ -78,7 +89,7 @@ async def upload_inspection_photos(
             else:
                 minor_detected += 1
 
-            # 2. Upload to Cloudinary in background
+            # Upload to Cloudinary
             cloud_url = await asyncio.to_thread(
                 cloudinary_service.upload_file, temp_path, f"inspexion/sessions/{session.id}"
             )
@@ -109,13 +120,13 @@ async def upload_inspection_photos(
     session.minor_defects_count += minor_detected
     session.status = InspectionStatus.COMPLETED
 
-    # AUTO-CREATE REPORT RECORD (so History is NEVER empty!)
+    # Auto-create Report record with clean sequence number (#1 for first scan)
     existing_rep = await db.execute(select(PDFReport).where(PDFReport.session_id == session.id))
     if not existing_rep.scalars().first():
         report = PDFReport(
             session_id=session.id,
             file_path="in_memory_stream",
-            report_title=f"Audit_Report_#{user_sessions_count}"
+            report_title=f"Audit Report #{user_scan_number}"
         )
         db.add(report)
 
@@ -124,7 +135,7 @@ async def upload_inspection_photos(
     return {
         "message": "Inspection completed successfully.",
         "session_id": session.id,
-        "session_number": user_sessions_count, # User's own inspection counter (#1, #2)
+        "session_number": user_scan_number, # 100% clean user counter (#1 for first scan)
         "processed_count": len(photos),
         "critical_defects": critical_detected,
         "minor_defects": minor_detected,
@@ -143,14 +154,6 @@ async def generate_document(
     if not session:
         raise HTTPException(status_code=404, detail="Inspection session not found.")
 
-    # Calculate user session number
-    user_sessions_count = await db.scalar(
-        select(func.count(InspectionSession.id)).where(
-            InspectionSession.user_id == user.id,
-            InspectionSession.id <= session.id
-        )
-    ) or 1
-
     img_result = await db.execute(select(InspectionImage).where(InspectionImage.session_id == session.id))
     images = img_result.scalars().all()
     all_detections = [
@@ -163,13 +166,6 @@ async def generate_document(
 
     rep_res = await db.execute(select(PDFReport).where(PDFReport.session_id == session.id))
     report = rep_res.scalars().first()
-    if not report:
-        report = PDFReport(
-            session_id=session.id,
-            file_path="in_memory_stream",
-            report_title=f"Audit_Report_#{user_sessions_count}"
-        )
-        db.add(report)
 
     await db.commit()
     await db.refresh(report)
@@ -180,7 +176,6 @@ async def list_report_history(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    # Returns all reports for the user ordered by newest first
     result = await db.execute(
         select(PDFReport)
         .join(InspectionSession, PDFReport.session_id == InspectionSession.id)
@@ -203,16 +198,6 @@ async def download_pdf_report(
     session_res = await db.execute(select(InspectionSession).where(InspectionSession.id == report.session_id))
     session = session_res.scalars().first()
 
-    # Get user session number for PDF title
-    user_sessions_count = 1
-    if session:
-        user_sessions_count = await db.scalar(
-            select(func.count(InspectionSession.id)).where(
-                InspectionSession.user_id == user.id,
-                InspectionSession.id <= session.id
-            )
-        ) or 1
-
     img_res = await db.execute(select(InspectionImage).where(InspectionImage.session_id == report.session_id))
     db_images = img_res.scalars().all()
     images_data = [
@@ -234,8 +219,8 @@ async def download_pdf_report(
     }
 
     pdf_bytes = pdf_generator.generate_report_bytes(
-        session_id=user_sessions_count,
-        title=f"Inspection #{user_sessions_count}",
+        session_id=report.id,
+        title=report.report_title.replace("_", " "),
         summary=summary_text,
         defects_summary=defects_stat,
         images_data=images_data
@@ -245,6 +230,6 @@ async def download_pdf_report(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f"attachment; filename=Audit_Report_#{user_sessions_count}.pdf"
+            "Content-Disposition": f"attachment; filename={report.report_title}.pdf"
         }
     )
