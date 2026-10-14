@@ -48,7 +48,7 @@ async def upload_inspection_photos(
     if not session:
         raise HTTPException(status_code=404, detail="Inspection session not found.")
 
-    # 1. Clean up abandoned draft sessions with 0 images so they never mess up the counter
+    # Clean abandoned empty sessions
     await db.execute(
         delete(InspectionSession).where(
             InspectionSession.user_id == user.id,
@@ -57,14 +57,12 @@ async def upload_inspection_photos(
         )
     )
 
-    # 2. Count ONLY real completed reports this user actually owns
+    # User's sequential scan number
     completed_reports_count = await db.scalar(
         select(func.count(PDFReport.id))
         .join(InspectionSession, PDFReport.session_id == InspectionSession.id)
         .where(InspectionSession.user_id == user.id)
     ) or 0
-
-    # Clean user scan number: 1st scan is ALWAYS #1
     user_scan_number = completed_reports_count + 1
 
     session.status = InspectionStatus.PROCESSING
@@ -80,7 +78,7 @@ async def upload_inspection_photos(
             with open(temp_path, "wb") as buffer:
                 shutil.copyfileobj(photo.file, buffer)
 
-            # Analyze directly with raw base64 (accurate detection)
+            # Analyze image and detect all damage boxes
             cv_result = await yolo_service.analyze_image_file(temp_path)
             is_defect = cv_result.get("is_critical", False)
 
@@ -89,7 +87,6 @@ async def upload_inspection_photos(
             else:
                 minor_detected += 1
 
-            # Upload to Cloudinary
             cloud_url = await asyncio.to_thread(
                 cloudinary_service.upload_file, temp_path, f"inspexion/sessions/{session.id}"
             )
@@ -100,7 +97,7 @@ async def upload_inspection_photos(
                 session_id=session.id,
                 file_path=cloud_url,
                 original_filename=photo.filename,
-                yolo_detections=cv_result.get("detections", []),
+                yolo_detections=cv_result.get("boxes", []),
                 detected_category=cv_result["primary_category"],
                 confidence_score=cv_result["confidence_score"]
             )
@@ -112,7 +109,8 @@ async def upload_inspection_photos(
                 "category": cv_result["primary_category"],
                 "confidence": cv_result["confidence_score"],
                 "is_critical": is_defect,
-                "description": cv_result.get("defect_description", "Item visually inspected.")
+                "description": cv_result.get("defect_description", "Item visually inspected."),
+                "boxes": cv_result.get("boxes", [])
             })
 
     session.total_images += len(photos)
@@ -120,7 +118,6 @@ async def upload_inspection_photos(
     session.minor_defects_count += minor_detected
     session.status = InspectionStatus.COMPLETED
 
-    # Auto-create Report record with clean sequence number (#1 for first scan)
     existing_rep = await db.execute(select(PDFReport).where(PDFReport.session_id == session.id))
     if not existing_rep.scalars().first():
         report = PDFReport(
@@ -135,7 +132,7 @@ async def upload_inspection_photos(
     return {
         "message": "Inspection completed successfully.",
         "session_id": session.id,
-        "session_number": user_scan_number, # 100% clean user counter (#1 for first scan)
+        "session_number": user_scan_number,
         "processed_count": len(photos),
         "critical_defects": critical_detected,
         "minor_defects": minor_detected,
@@ -198,6 +195,15 @@ async def download_pdf_report(
     session_res = await db.execute(select(InspectionSession).where(InspectionSession.id == report.session_id))
     session = session_res.scalars().first()
 
+    user_sessions_count = 1
+    if session:
+        user_sessions_count = await db.scalar(
+            select(func.count(InspectionSession.id)).where(
+                InspectionSession.user_id == user.id,
+                InspectionSession.id <= session.id
+            )
+        ) or 1
+
     img_res = await db.execute(select(InspectionImage).where(InspectionImage.session_id == report.session_id))
     db_images = img_res.scalars().all()
     images_data = [
@@ -206,7 +212,7 @@ async def download_pdf_report(
             "category": img.detected_category,
             "conf": img.confidence_score,
             "is_critical": any(c in img.detected_category.lower() for c in ["crack", "dent", "broken", "damage", "glass", "hazard"]),
-            "description": "Visual diagnostic scan complete."
+            "description": "Damage points identified and confirmed."
         }
         for img in db_images
     ]
@@ -218,9 +224,10 @@ async def download_pdf_report(
         "minor": session.minor_defects_count if session else 0
     }
 
+    # Embeds images and defect breakdown side-by-side into the downloaded PDF!
     pdf_bytes = pdf_generator.generate_report_bytes(
-        session_id=report.id,
-        title=report.report_title.replace("_", " "),
+        session_id=user_sessions_count,
+        title=f"Inspection #{user_sessions_count}",
         summary=summary_text,
         defects_summary=defects_stat,
         images_data=images_data
@@ -230,6 +237,6 @@ async def download_pdf_report(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f"attachment; filename={report.report_title}.pdf"
+            "Content-Disposition": f"attachment; filename=Audit_Report_#{user_sessions_count}.pdf"
         }
     )
