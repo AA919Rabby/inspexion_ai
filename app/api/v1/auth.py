@@ -7,14 +7,10 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.security import verify_google_token, verify_apple_token, create_access_token
 from app.models.models import User
-from app.schemas.schemas import GoogleAuthRequest, TokenResponse
+from app.schemas.schemas import GoogleAuthRequest, TokenResponse, AppleAuthRequest
 
 router = APIRouter()
 
-class AppleAuthRequest(BaseModel):
-    identity_token: str
-    email: Optional[str] = None
-    full_name: Optional[str] = None
 
 @router.post("/google", response_model=TokenResponse)
 async def authenticate_google(payload: GoogleAuthRequest, db: AsyncSession = Depends(get_db)):

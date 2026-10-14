@@ -34,6 +34,12 @@ class ImageOut(BaseModel):
     class Config:
         from_attributes:True
 
+
+class AppleAuthRequest(BaseModel):
+    identity_token: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+
 class InspectionSessionCreate(BaseModel):
     title:str="Asset Physical Inspection"
     asset_type:str="Machinery/Automotive/Warehouse"
